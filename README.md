@@ -10,6 +10,8 @@
 
 在复盘之上还提供**只读的「场次对比」模块**（<http://localhost:3000/compare.html>）：从复盘场次列表中选择**两个已结束场次**，逐口令生成对照表。匹配键为**规范化口令文本**（NFKC 全角/半角统一、去除汉字间排版空白、折叠空白、小写）加**排序去重后的目标岗位**；再以**动态规划在保持两场原顺序**的前提下做序列对齐（类 Needleman–Wunsch / LCS）。重复键出现多种最优解时，依次按**匹配数最多 → 总序号偏移 Σ|A序号−B序号| 最小 → 左场序号优先**裁决出唯一结果。对照表逐行标出**匹配**（两场共有）、**新增**（仅右场 B）、**删除**（仅左场 A）；每个匹配项展示**从口令开始（修订重发不重置）到完成的耗时**与**超时、迟到确认、修订、暂停次数**及两场差值（B − A），**点击任一侧口令即在复盘中打开该场次并跳转到该口令发出时刻**。对比同样为纯只读：仅一个 GET 接口、复用复盘的日志解析器，不写任何日志、不连接 WebSocket。
 
+另提供**只读的「可验证复盘归档」模块**（<http://localhost:3000/archive.html>）：选择一个已结束场次即可下载**单个 JSON 归档包**——内含格式版本、场次摘要、冻结序列、按日志顺序排列的有效事件与逐行告警；事件逐条经 **canonical JSON**（对象键递归排序、数组保序）编码为 UTF-8 后构造 **SHA-256 哈希链**（h₀ 为 32 字节零值，hᵢ = SHA-256(hᵢ₋₁ ‖ 当前事件字节）），清单 manifest 保存事件数与最终摘要。页面还支持**纯本地上传校验**：文件只在浏览器内解析、绝不上传，逐项重算并校验场次边界、事件数与最终摘要，失败时定位首个出问题的事件索引或字段，成功则展示归档摘要。归档同样为纯只读：仅一个 GET 导出接口、复用复盘的日志解析器，不写任何日志、不连接 WebSocket。
+
 技术栈：Node.js + Express + WebSocket（`ws`）+ 原生前端（无框架）。
 
 ## 快速开始（单条命令）
@@ -38,6 +40,7 @@ npm install && npm start
 | 岗位端 | <http://localhost:3000/position.html> | 岗位上岗、接收口令、确认 |
 | 演出复盘（只读） | <http://localhost:3000/replay.html> | 列出 `data` 中已结束场次，重建可拖动口令时间轴，事件类型 / 岗位筛选，1×/2×/4× 播放、暂停与任意时刻确定性重放跳转 |
 | 场次对比（只读） | <http://localhost:3000/compare.html> | 选择两个已结束场次，按规范化口令 + 排序目标岗位做 DP 序列对齐，生成新增 / 删除 / 匹配逐口令对照表（耗时与超时、迟到、修订、暂停次数及差值，点击跳转复盘时刻） |
+| 复盘归档（只读） | <http://localhost:3000/archive.html> | 下载已结束场次的可验证归档（格式版本 / 场次摘要 / 冻结序列 / 有效事件 / 逐行告警 + 哈希链清单），或纯本地上传归档逐项重算校验（场次边界、事件数、最终摘要） |
 
 > 修改端口：设置环境变量 `PORT`，如 `PORT=8080 npm start`，Compose 中同步调整 `ports` 映射。
 
@@ -122,6 +125,24 @@ npm install && npm start
 
 - `GET /api/compare/sessions?a=<fileId>/<runId>&b=<fileId>/<runId>`：`{ left, right, rows, summary }`。`left` / `right` 含场次摘要 `session`、确认时限 `timeoutSec` 与逐口令指标 `cues`（`seq` / `text` / `targets` / `key` / `startT` / `durationMs` / `timeouts` / `lateConfirms` / `revisions` / `pauses` / `finalText`）；`rows` 为对齐结果，每项为 `{type:'match', left, right}`、`{type:'added', right}` 或 `{type:'deleted', left}`；`summary` 为 `{leftCount, rightCount, matched, added, deleted}`。参数缺失 / 非法 ID 返回 400，任一场不存在或未结束返回 404。
 
+## 可验证复盘归档（只读导出与纯本地校验）
+
+打开 <http://localhost:3000/archive.html>（首页「复盘归档」卡片同入口）。归档完全基于 `data/events-<场次ID>.jsonl` 历史日志，**只读**：页面不建立 WebSocket 连接、只有一个 GET 导出接口，服务端复用复盘模块的逐行解析器，绝不影响当前演出状态、绝不追加或修改事件日志。
+
+- **下载归档**：下拉选择已结束场次（`session-start` → `sequence-finished` 完整闭合），点击「下载归档 JSON」即通过 GET 接口以附件形式保存**单个 JSON 归档包**，包含：
+  - `format`：格式版本，当前为 `cue-archive/1`；
+  - `session`：场次摘要（`fileId` / `runId` / 起止时间 / 时长 / 口令数 / 事件数 / 确认时限）；
+  - `sequence`：冻结序列（本场开始时冻结的口令快照，按 `seq` 升序）；
+  - `events`：有效事件（保持日志行序，每条含原始行号 `line`、ISO 时间戳 `ts`、事件类型 `event` 与 `detail`；相对偏移、岗位聚合等派生字段不入归档）；
+  - `warnings`：本场行区间内的逐行坏数据告警（行号、原因、坏行原文）；
+  - `manifest`：清单 `{ algorithm: "SHA-256", eventCount, digest }`——事件数与哈希链**最终摘要**。
+- **哈希链**：每个事件对象先编码为 **canonical JSON**（对象键递归排序、数组保持原顺序）的 UTF-8 字节；`h₀` 为 32 字节零值，`hᵢ = SHA-256(hᵢ₋₁ 字节串接第 i 个事件字节)`；`manifest.digest` 为 `hₙ` 的小写十六进制。canonical 编码与链式计算由 `public/archive.js` 单份实现同时供服务端导出与浏览器校验使用，两端逐字节一致；同一日志文件重复导出结果逐字节相同（归档不含生成时刻）。
+- **纯本地校验**：选择本地归档文件后，文件**只在浏览器内解析、绝不上传**（FileReader + WebCrypto，无任何网络请求）。页面按固定顺序逐项重算校验：格式版本 → 场次摘要字段 → 冻结序列（序号连续）→ 事件结构 → **场次边界**（首事件 `session-start`、末事件 `sequence-finished`，且边界事件不得出现在场次内部）→ 逐行告警结构 → 清单形状与**事件数**一致性（`manifest.eventCount` / `session.eventCount` / `session.cueCount`）→ 用 WebCrypto 逐事件重算哈希链并比对**最终摘要**。**任一环节失败即定位首个出问题的事件索引（0 基）或字段名**并展示原因；全部通过则展示归档摘要（格式版本、场次信息、清单摘要、冻结序列与逐行告警）。
+
+归档只读 HTTP 接口（GET）：
+
+- `GET /api/archive/sessions/:fileId/:runId`：返回上述归档 JSON，以 `Content-Disposition: attachment` 附件形式下发（文件名 `cue-archive-<场次ID前8位>-run<场次序号>.json`）。`fileId` 强制 UUID 形状（杜绝路径穿越），非法返回 400，场次不存在或尚未结束返回 404。
+
 ## 核心规则
 
 - **指挥权租约**：开始 / 推进 / 替岗 / 撤回 / 暂停 / 恢复 / 重置七类操作仅租约持有者可执行。租约默认 15 秒、按心跳续期；申请与接管的检查与授予在同一同步消息处理内完成（原子裁决，并发申请先到者得）；持有者断线立即释放，心跳停止超时自动释放；每次授予生成新 `token`，旧连接的迟到心跳 / 释放凭旧 `token` 一律拒绝并记录，绝不续活新租约。持有者与剩余有效期随全量快照下发，非持有者前端按钮禁用、服务端同步拒绝（`lease-op-denied`）。
@@ -142,6 +163,7 @@ npm install && npm start
 ├── server.js            # Express + WebSocket 服务端，状态机与日志
 ├── replay.js            # 演出复盘（只读）：JSONL 逐行解析、坏行告警、场次切分与单场接口
 ├── compare.js           # 场次对比（只读）：匹配键规范化、逐口令指标提取与 DP 序列对齐
+├── archive.js           # 可验证复盘归档（只读）：复用复盘解析器打包哈希链归档（canonical JSON + SHA-256 链）
 ├── public/
 │   ├── index.html       # 首页（导航 + 事件日志）
 │   ├── director.html    # 导演端：序列编排
@@ -150,11 +172,14 @@ npm install && npm start
 │   ├── replay.html      # 演出复盘：场次列表 + 可拖动时间轴回放（支持 ?t= 深链定位）
 │   ├── replay.js        # 复盘确定性重放器（纯函数折叠）与事件分类
 │   ├── compare.html     # 场次对比：两场选择 + 逐口令对照表（匹配 / 新增 / 删除 + 指标差值）
+│   ├── archive.html     # 复盘归档：场次归档下载 + 纯本地上传逐项校验（不连接 WebSocket、不上传文件）
+│   ├── archive.js       # 归档共用模块（UMD）：canonical JSON、SHA-256 哈希链与归档校验器，服务端 / 浏览器同一份实现
 │   ├── common.js        # 自动重连 WebSocket 封装与渲染工具
 │   └── style.css
 ├── test/smoke.js        # 端到端冒烟测试（176 项断言）
 ├── test/replay.js       # 演出复盘测试（解析/坏行/切分/接口/确定性重放，37 项断言）
 ├── test/compare.js      # 场次对比测试（匹配键/指标/DP 对齐与三层裁决穷举交叉验证/只读接口，40 项断言）
+├── test/archive.js      # 复盘归档测试（canonical JSON/哈希链/归档结构/篡改定位/只读接口，44 项断言）
 ├── Dockerfile
 ├── docker-compose.yml
 └── data/                # 事件日志落盘目录（运行时生成）
@@ -168,7 +193,10 @@ npm install && npm start
 node test/smoke.js
 node test/replay.js
 node test/compare.js
+node test/archive.js
 ```
+
+`test/archive.js` 覆盖可验证复盘归档：canonical JSON（对象键递归排序、数组保序、中文 UTF-8、不可序列化类型抛错）、归档构造（格式版本、场次摘要、冻结序列、有效事件保持日志行序且不含派生字段、逐行告警限于本场行区间、manifest 算法 / 事件数 / 最终摘要）、哈希链与独立手算交叉验证（h₀ 为 32 字节零值、串接哈希）、同一日志重复导出逐字节一致、本地校验器（合法归档通过；篡改事件内容 / 删除事件 / 伪造事件数 / 破坏首末边界 / 边界事件混入内部 / detail 非对象 / 格式版本错误 / 序号不连续 / 摘要形状非法 / 伪造摘要逐项定位到首个事件索引或字段）、只读 HTTP 接口（200 附件下载与结构、接口归档通过完整校验、非法 ID 与路径穿越 400、不存在 404、页面可访问且不含 WebSocket 代码）。
 
 `test/compare.js` 覆盖场次对比：匹配键规范化（NFKC / 汉字间排版空白 / 大小写 / 岗位排序去重）、逐口令指标提取（耗时从首次发令到完成、修订不重置起点、超时 / 迟到确认 / 修订 / 暂停计数、修订改文本时键按原始口令而 finalText 反映最终版）、DP 序列对齐（保持原顺序、匹配 / 新增 / 删除、全角空白与岗位顺序差异仍匹配）、重复键多解的三层裁决（匹配数最多 → 总序号偏移最小 → 左场序号优先）并以 **400 组随机小序列穷举所有保序匹配集合交叉验证 DP 最优解**、端到端 `compareSessions`（汇总计数 / 非法 ID / 不存在场次）、只读 HTTP 接口（缺参 400 / 非法 ID 与路径穿越 400 / 404 / 200 结构）以及对比页面可访问且不含 WebSocket 代码。
 

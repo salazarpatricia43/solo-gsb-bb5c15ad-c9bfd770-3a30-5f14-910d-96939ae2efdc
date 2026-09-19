@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>可验证复盘归档 · 舞台口令同步系统</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>🧾 可验证复盘归档（只读）</h1>
+    <nav>
+      <a href="replay.html">演出复盘</a>
+      <a href="compare.html">场次对比</a>
+      <a href="/">← 返回首页</a>
+    </nav>
+  </header>
+  <main>
+    <!-- 下载归档 -->
+    <section class="card">
+      <h2>下载场次归档</h2>
+      <div class="muted" style="margin-bottom:12px">
+        选择一个已结束场次，下载单个 JSON 归档包：含格式版本、场次摘要、冻结序列、
+        有效事件（按日志顺序）与逐行告警；清单 manifest 保存事件数与哈希链最终摘要
+        （h₀ 为 32 字节零值，事件经 canonical JSON 编码为 UTF-8 后，
+        h<sub>i</sub> = SHA-256(h<sub>i−1</sub> ‖ 当前事件字节））。
+        导出为纯 GET 只读接口，不写日志、不连接 WebSocket。
+      </div>
+      <div id="sessLoading" class="muted">正在读取已结束场次列表…</div>
+      <div class="row" id="downloadRow" style="display:none">
+        <select id="sessionSelect"></select>
+        <a id="downloadLink" class="narrow" style="flex:0 0 auto"><button type="button">⬇ 下载归档 JSON</button></a>
+      </div>
+    </section>
+
+    <!-- 本地校验 -->
+    <section class="card">
+      <h2>本地校验归档</h2>
+      <div class="muted" style="margin-bottom:12px">
+        选择本地归档文件（.json）逐项重算并校验：格式版本、场次边界
+        （session-start → sequence-finished 完整闭合）、事件数与哈希链最终摘要。
+        <b>纯本地校验：文件只在浏览器内解析，绝不上传。</b>
+        校验失败时定位首个出问题的事件索引或字段。
+      </div>
+      <input type="file" id="fileInput" accept=".json,application/json" style="margin-bottom:14px">
+      <div id="verifyBanner" class="status-banner"></div>
+      <div id="verifyDetail"></div>
+    </section>
+  </main>
+
+  <script src="archive.js"></script>
+  <script>
+  (() => {
+    'use strict';
+    // 只读页：下载走 GET 接口；校验完全在本地进行（FileReader + WebCrypto），
+    // 不创建 WebSocket、不上传文件、没有任何写接口调用。
+
+    function esc(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+      }[c]));
+    }
+    function fmtClock(iso) {
+      const d = new Date(iso);
+      return d.toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+    function fmtDuration(ms) {
+      if (ms == null || !Number.isFinite(ms)) return '—';
+      const sec = Math.round(ms / 100) / 10;
+      if (sec < 60) return `${sec} 秒`;
+      const m = Math.floor(sec / 60);
+      const s = Math.round(sec - m * 60);
+      return `${m} 分 ${s} 秒`;
+    }
+
+    const sessLoading = document.getElementById('sessLoading');
+    const downloadRow = document.getElementById('downloadRow');
+    const sessionSelect = document.getElementById('sessionSelect');
+    const downloadLink = document.getElementById('downloadLink');
+    const fileInput = document.getElementById('fileInput');
+    const verifyBanner = document.getElementById('verifyBanner');
+    const verifyDetail = document.getElementById('verifyDetail');
+
+    // ---------------------------------------------------------------------
+    // 下载：场次下拉 + GET 附件链接
+    // ---------------------------------------------------------------------
+    function optionLabel(s) {
+      return `${fmtClock(s.startedAt)} → ${fmtClock(s.finishedAt)} ｜ ${s.cueCount} 条口令 ｜ ${s.eventCount} 事件 ｜ ${s.fileId.slice(0, 8)}… #${s.runId + 1}`;
+    }
+    function refreshDownloadLink() {
+      const v = sessionSelect.value; // "fileId/runId"
+      if (!v) { downloadLink.href = '#'; return; }
+      const idx = v.indexOf('/');
+      // fileId 与 runId 是两个独立路径段，必须分别编码（整体编码会把 / 变成 %2F 导致路由不匹配）
+      downloadLink.href = `/api/archive/sessions/${encodeURIComponent(v.slice(0, idx))}/${encodeURIComponent(v.slice(idx + 1))}`;
+    }
+    async function initSessions() {
+      let payload;
+      try {
+        payload = await (await fetch('/api/replay/sessions')).json();
+      } catch {
+        sessLoading.innerHTML = '<span style="color:#ff9c9c">场次列表加载失败，请确认服务已启动</span>';
+        return;
+      }
+      const sessions = payload.sessions || [];
+      if (!sessions.length) {
+        sessLoading.innerHTML = '<span style="color:#f0c169">data 目录中尚无已结束（session-start → sequence-finished 完整闭合）的场次。</span>';
+        return;
+      }
+      sessLoading.style.display = 'none';
+      downloadRow.style.display = '';
+      sessionSelect.innerHTML = sessions.map((s) =>
+        `<option value="${esc(`${s.fileId}/${s.runId}`)}">${esc(optionLabel(s))}</option>`).join('');
+      refreshDownloadLink();
+    }
+    sessionSelect.addEventListener('change', refreshDownloadLink);
+
+    // ---------------------------------------------------------------------
+    // 本地校验：逐项重算（结构 → 边界 → 计数 → 哈希链摘要）
+    // ---------------------------------------------------------------------
+    function showFailure(f) {
+      verifyBanner.className = 'status-banner show warn';
+      const where = f.where === 'event'
+        ? `首个失败点：事件索引 <b>${f.index}</b>（events[${f.index}]）`
+        : `首个失败点：字段 <b>${esc(f.field)}</b>`;
+      verifyBanner.innerHTML = `✗ 校验失败 —— ${where}<br>${esc(f.message)}`;
+      verifyDetail.innerHTML = '';
+    }
+
+    function showSuccess(a, digestHex) {
+      verifyBanner.className = 'status-banner show';
+      verifyBanner.innerHTML = '✓ 校验通过：格式版本、场次边界、事件数与哈希链最终摘要逐项重算一致';
+
+      const s = a.session;
+      const seqRows = a.sequence.map((c) =>
+        `<tr><td><span class="chip">#${c.seq}</span></td><td>${esc(c.text)}</td>` +
+        `<td><span class="muted">${c.targets.map(esc).join('、')}</span></td></tr>`).join('');
+      const warnRows = a.warnings.length
+        ? a.warnings.map((w) =>
+          `<tr><td>第 ${w.line} 行</td><td>${esc(w.reason)}</td>` +
+          `<td><span class="muted">${esc(w.raw || '—')}</span></td></tr>`).join('')
+        : '<tr><td colspan="3"><span class="muted">本场无坏数据告警</span></td></tr>';
+
+      verifyDetail.innerHTML = `
+        <div class="row" style="margin-top:16px">
+          <div>
+            <h2 style="margin-bottom:8px">归档摘要</h2>
+            <div class="replay-meta">
+              <span>格式版本 <b>${esc(a.format)}</b></span>
+              <span>场次 <b>${esc(fmtClock(s.startedAt))} → ${esc(fmtClock(s.finishedAt))}</b></span>
+              <span>时长 <b>${esc(fmtDuration(s.durationMs))}</b></span>
+              <span>口令 <b>${s.cueCount}</b> 条</span>
+              <span>事件 <b>${s.eventCount}</b> 条</span>
+              <span>确认时限 <b>${s.timeoutSec}s</b></span>
+              <span>逐行告警 <b>${a.warnings.length}</b> 条</span>
+            </div>
+          </div>
+        </div>
+        <h2 style="margin-top:16px">清单 manifest</h2>
+        <table>
+          <tbody>
+            <tr><th style="width:160px">哈希算法</th><td>${esc(a.manifest.algorithm)}</td></tr>
+            <tr><th>事件数</th><td>${a.manifest.eventCount}</td></tr>
+            <tr><th>最终摘要</th><td><code style="word-break:break-all">${esc(digestHex)}</code></td></tr>
+          </tbody>
+        </table>
+        <h2 style="margin-top:16px">冻结序列（${a.sequence.length} 条口令）</h2>
+        <table>
+          <thead><tr><th style="width:70px">序号</th><th>口令内容</th><th>目标岗位</th></tr></thead>
+          <tbody>${seqRows}</tbody>
+        </table>
+        <h2 style="margin-top:16px">逐行告警（${a.warnings.length} 条）</h2>
+        <table>
+          <thead><tr><th style="width:90px">行号</th><th>原因</th><th>坏行原文</th></tr></thead>
+          <tbody>${warnRows}</tbody>
+        </table>`;
+    }
+
+    async function verifyFile(file) {
+      verifyBanner.className = 'status-banner';
+      verifyBanner.innerHTML = '';
+      verifyDetail.innerHTML = '';
+
+      // 纯本地读取：FileReader / file.text() 只在浏览器内解析，绝不上传
+      let archive;
+      try {
+        archive = JSON.parse(await file.text());
+      } catch (err) {
+        showFailure({ where: 'field', field: '(file)', message: `文件不是合法 JSON：${err.message}` });
+        return;
+      }
+
+      // 逐项校验：格式版本 → 场次摘要 → 冻结序列 → 事件结构 → 场次边界 → 告警 → 清单与计数
+      const st = Archive.verifyArchiveStructure(archive);
+      if (!st.ok) return showFailure(st);
+
+      // 哈希链最终摘要：本地逐项重算（WebCrypto SHA-256）并与 manifest 比对
+      let digestHex;
+      try {
+        digestHex = await Archive.computeChainHex(archive.events);
+      } catch {
+        showFailure({ where: 'field', field: 'manifest.digest', message: '当前浏览器不支持 WebCrypto SHA-256，无法重算摘要' });
+        return;
+      }
+      const dg = Archive.verifyDigest(archive, digestHex);
+      if (!dg.ok) return showFailure(dg);
+
+      showSuccess(archive, digestHex);
+    }
+
+    fileInput.addEventListener('change', () => {
+      const file = fileInput.files && fileInput.files[0];
+      if (file) verifyFile(file);
+    });
+
+    initSessions();
+  })();
+  </script>
+</body>
+</html>
