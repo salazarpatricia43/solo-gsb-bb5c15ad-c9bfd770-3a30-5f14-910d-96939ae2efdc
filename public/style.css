@@ -477,3 +477,31 @@ tr.current-row td { background: #24304a; }
   .compare-table { table-layout: auto; }
 }
 
+/* 可验证复盘归档（/archive.html，只读） */
+.archive-meta { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 13px; color: #9aa3b8; margin-top: 10px; }
+.archive-meta b { color: #c3c9d8; font-weight: 600; }
+.archive-result {
+  border-radius: 8px;
+  padding: 12px 16px;
+  font-size: 13px;
+  line-height: 1.8;
+}
+.archive-result.ok { background: #1e3a2a; border: 1px solid #2f6f4a; color: #c9e8d4; }
+.archive-result.fail { background: #4a2b2b; border: 1px solid #7a3a3a; color: #f0c9c9; }
+.archive-result-head { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+.archive-result.ok .archive-result-head { color: #8fe3a5; }
+.archive-result.fail .archive-result-head { color: #ff9c9c; }
+.archive-fail-msg { color: #ffd9d9; }
+.archive-fail-loc { color: #e8b8b8; }
+.archive-fail-loc code, .archive-digest code {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  background: #14161c;
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+.archive-digest {
+  margin-top: 8px;
+  font-size: 12px;
+  word-break: break-all;
+}
+

@@ -8,6 +8,7 @@ RUN npm install --omit=dev
 COPY server.js ./
 COPY replay.js ./
 COPY compare.js ./
+COPY archive.js ./
 COPY public ./public
 
 ENV PORT=3000

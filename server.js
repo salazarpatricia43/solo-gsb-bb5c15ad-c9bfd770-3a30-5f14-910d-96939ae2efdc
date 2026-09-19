@@ -8,6 +8,7 @@ const express = require('express');
 const { WebSocketServer } = require('ws');
 const replay = require('./replay'); // 演出复盘（只读）模块：只读 data 目录事件日志，不触碰当前演出状态
 const compare = require('./compare'); // 场次对比（只读）模块：复用复盘解析器做两场口令序列对齐，不写日志、不接 WebSocket
+const archive = require('./archive'); // 可验证复盘归档（只读）模块：导出带哈希链摘要的 JSON 归档，不写日志、不接 WebSocket
 
 const PORT = process.env.PORT || 3000;
 const DATA_DIR = path.join(__dirname, 'data');
@@ -209,6 +210,24 @@ app.get('/api/compare/sessions', (req, res) => {
   if (result.error === 'notFound') return res.status(404).json({ error: '场次不存在或尚未结束' });
   if (result.error) return res.status(500).json({ error: '读取事件日志失败' });
   res.json(result);
+});
+
+// ---------------------------------------------------------------------------
+// 可验证复盘归档（只读）HTTP 接口：仅供 /archive.html 调用。
+// 导出单个 JSON 归档包（格式版本 / 场次摘要 / 冻结序列 / 有效事件 / 逐行告警 /
+// manifest 哈希链摘要）。复用复盘模块的只读日志解析器：不写事件日志、
+// 不引用当前演出状态、不接 WebSocket；仅 GET 导出。
+//   GET /api/archive/sessions/:fileId/:runId
+// ---------------------------------------------------------------------------
+app.get('/api/archive/sessions/:fileId/:runId', (req, res) => {
+  const result = archive.buildArchive(DATA_DIR, req.params.fileId, req.params.runId);
+  if (result.error === 'badId') return res.status(400).json({ error: '场次 ID 不合法' });
+  if (result.error === 'notFound') return res.status(404).json({ error: '场次不存在或尚未结束' });
+  if (result.error) return res.status(500).json({ error: '读取事件日志失败' });
+  const a = result.archive;
+  res.setHeader('Content-Disposition',
+    `attachment; filename="cue-archive-${a.session.fileId}-run${a.session.runId + 1}.json"`);
+  res.json(a);
 });
 
 const onlinePositions = new Set(); // 当前在线的岗位名
@@ -1020,6 +1039,7 @@ server.listen(PORT, () => {
   console.log(`  岗位端:   http://localhost:${PORT}/position.html`);
   console.log(`  演出复盘: http://localhost:${PORT}/replay.html （只读，回放已结束场次）`);
   console.log(`  场次对比: http://localhost:${PORT}/compare.html （只读，逐口令对齐两个已结束场次）`);
+  console.log(`  复盘归档: http://localhost:${PORT}/archive.html （只读，导出 / 本地校验可验证归档）`);
   console.log(`  指挥权租约: ${LEASE_TTL_MS / 1000} 秒（心跳续期，超时/断线自动释放）`);
   console.log(`  事件日志: data/events-${state.sessionId}.jsonl`);
 });
